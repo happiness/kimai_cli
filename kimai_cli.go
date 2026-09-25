@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"slices"
 	"sync"
+	"flag"
 )
 
 type TimeSheet struct {
@@ -25,12 +26,18 @@ type TimeSheet struct {
 type Project struct {
 	CustomerName 			 string      `json:"parentTitle"`
 	ProjectName				 string      `json:"name"`
+	CustomerId         int      `json:"customer"`
 }
 
 type DayRange struct {
 	DayName  string
 	Start    time.Time
 	End      time.Time
+}
+
+type Customer struct {
+	ID           int    `json:"id"` 
+	Description  string `json:"description"`
 }
 
 var token string
@@ -104,9 +111,7 @@ func getWeek() {
 			duration := float64(sheet.Duration) / 3600.0
 			totalDuration = totalDuration + duration
 			dayDuration = dayDuration + duration
-			project := getProject(sheet.Project)
-			message := fmt.Sprintf("%s %s %d - %s %.1f", project.CustomerName, project.ProjectName , sheet.Activity, sheet.Description, duration)
-			fmt.Println(message)
+			outputSheet(sheet, duration)
 		}
 		dayDurationStr := fmt.Sprintf("%s time reported total: %.1f", dayName, dayDuration)
 		fmt.Println(dayDurationStr)
@@ -143,9 +148,7 @@ func getToday() {
         }
         for _,sheet := range timesheets {
                 duration := sheet.Duration / 3600
-                project := getProject(sheet.Project)
-                message := fmt.Sprintf("%s %s %d - %s %.1f", project.CustomerName, project.ProjectName , sheet.Activity, sheet.Description, duration)
-                fmt.Println(message)
+								outputSheet(sheet, duration)
         }
 }
 
@@ -186,6 +189,50 @@ func getShortWeekInfo() {
 	fmt.Println(message)
 }
 
+func outputSheet(sheet TimeSheet, duration float64) {
+	project := getProject(sheet.Project)
+	message := fmt.Sprintf("%s %s %d - %s %.1f", project.CustomerName, project.ProjectName , sheet.Activity, sheet.Description, duration)
+	fmt.Println(message)
+}
+
+func searchCustomers(customer string) []Customer {
+	url := BaseUrl + "customers?terms" + customer
+	body := makeRequest(url)
+	var customers []Customer
+  err := json.NewDecoder(strings.NewReader(body)).Decode(&customers)
+  if err != nil {
+  	panic(err)
+  }
+	return customers
+}
+
+func searchTimesheets(term string) []TimeSheet {
+	url := BaseUrl + "timesheets?term=" + term
+	sheets := getTimeSheets(url)
+	return sheets
+}
+
+func searchCustomerAndDescription(customer string, description string) {
+	customers := searchCustomers(customer)
+	timesheets := searchTimesheets(description)
+	duration := 0.0
+	var customer_ids []int
+	for _, customerHits := range customers {
+		customer_ids = append(customer_ids, customerHits.ID)
+	}
+	totalHitDuration := 0.0
+	for _, timesheet := range timesheets {
+		project := getProject(timesheet.Project)
+		if slices.Contains(customer_ids, project.CustomerId) {
+			duration = timesheet.Duration / 3600 
+			totalHitDuration = totalHitDuration + duration
+			outputSheet(timesheet, duration)
+		}
+		msg := fmt.Sprintf("Total duration of all hits: %.1f", totalHitDuration)
+		fmt.Println(msg)
+	}
+}
+
 func makeRequest(url string) string {
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", url, nil)
@@ -213,16 +260,36 @@ func makeRequest(url string) string {
 
 func main() {
 	setToken()
-	argsWithoutProg := os.Args[1:]
-	if len(argsWithoutProg) == 0 || slices.Contains(argsWithoutProg, "short") {
+	if len(os.Args) < 2 {
 		getShortWeekInfo()
+		return
 	}
-	if slices.Contains(argsWithoutProg, "today") {
-		getToday()
-	}
-	if slices.Contains(argsWithoutProg, "week") {
-		fmt.Println("Get week data")
-		getWeek()
+	switch os.Args[1] {
+		case "short":
+			getShortWeekInfo()
+			fmt.Println("About to search")
+
+		case "today":
+			getToday()
+
+		case "week":
+			fmt.Println("Get week data")
+			getWeek()
+
+		case "s", "search":
+			searchCmd := flag.NewFlagSet("search", flag.ExitOnError)
+			customerPtr := searchCmd.String("customer", "", "The name of the customer to search for")
+			descriptionPtr := searchCmd.String("description", "", "The description keywords to search for")
+
+			// Parse only the arguments AFTER the word "search"
+			searchCmd.Parse(os.Args[2:])
+			customerValue := *customerPtr
+			descriptionValue := *descriptionPtr
+			searchCustomerAndDescription(customerValue, descriptionValue)
+
+		default:
+			fmt.Printf("Unknown command: %s\n", os.Args[1])
+			fmt.Println("Expected commands: short, today, week, search")
 	}
 }
 
