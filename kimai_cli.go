@@ -5,13 +5,18 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 type Client struct {
@@ -48,6 +53,12 @@ type Customer struct {
 
 const defaultBaseURL = "https://kimai.hpns.dev/api/"
 const customLayout = "2006-01-02T15:04:05"
+
+// Config is read from <user config dir>/kimai_cli/config.toml.
+// The token is deliberately not part of it, it is only read from KIMAI_TOKEN.
+type Config struct {
+	URL string `toml:"url"`
+}
 
 func getWorkWeekMF(t time.Time) []DayRange {
 	currentDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
@@ -86,6 +97,30 @@ func getToken() string {
 		os.Exit(3)
 	}
 	return token
+}
+
+func loadConfig() (Config, error) {
+	cfg := Config{URL: defaultBaseURL}
+
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return cfg, fmt.Errorf("find config dir: %w", err)
+	}
+	path := filepath.Join(dir, "kimai_cli", "config.toml")
+	_, err = toml.DecodeFile(path, &cfg)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return cfg, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	// Environment variable overrides the config file.
+	if v := os.Getenv("KIMAI_URL"); v != "" {
+		cfg.URL = v
+	}
+	// Endpoints are appended directly, so make sure the URL ends with a slash.
+	if !strings.HasSuffix(cfg.URL, "/") {
+		cfg.URL += "/"
+	}
+	return cfg, nil
 }
 
 func (c *Client) fetchWeekData() (map[string][]TimeSheet, error) {
@@ -292,13 +327,17 @@ func getJSON[T any](c *Client, endpoint string) (T, error) {
 }
 
 func main() {
-	c := newClient(defaultBaseURL, getToken())
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	c := newClient(cfg.URL, getToken())
 	cmd := "short"
 	if len(os.Args) >= 2 {
 		cmd = os.Args[1]
 	}
 
-	var err error
 	switch cmd {
 	case "short":
 		err = c.getShortWeekInfo()
