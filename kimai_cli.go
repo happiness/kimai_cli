@@ -27,7 +27,7 @@ type TimeSheet struct {
 type Project struct {
 	CustomerName 			 string      `json:"parentTitle"`
 	ProjectName				 string      `json:"name"`
-	CustomerId         int      `json:"customer"`
+	CustomerID         int      `json:"customer"`
 }
 
 type DayRange struct {
@@ -42,7 +42,9 @@ type Customer struct {
 }
 
 var token string
-const BaseUrl = "https://kimai.hpns.dev/api/"
+const BaseURL = "https://kimai.hpns.dev/api/"
+const customLayout= "2006-01-02T15:04:05"
+var projectCache = map[int]Project{}
 
 func setToken() {
 	token = os.Getenv("KIMAI_TOKEN");
@@ -78,7 +80,6 @@ func GetWorkWeekMF(t time.Time) []DayRange {
 func fetchWeekData() map[string][]TimeSheet {
 	now := time.Now()
 	workDays := GetWorkWeekMF(now)
-	customLayout := "2006-01-02T15:04:05"
 	weeklyMap := make(map[string][]TimeSheet)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -86,7 +87,7 @@ func fetchWeekData() map[string][]TimeSheet {
 		wg.Add(1)
 		go func(d DayRange) {
 			defer wg.Done()
-			url := BaseUrl + "timesheets?begin=" + d.Start.Format(customLayout) + "&end=" + d.End.Format(customLayout)
+			url := BaseURL + "timesheets?begin=" + d.Start.Format(customLayout) + "&end=" + d.End.Format(customLayout)
 			timesheets := getTimeSheets(url)
 			mu.Lock()
 			weeklyMap[d.Start.Weekday().String()] = timesheets            
@@ -114,12 +115,10 @@ func getWeek() {
 			dayDuration = dayDuration + duration
 			outputSheet(sheet, duration)
 		}
-		dayDurationStr := fmt.Sprintf("%s time reported total: %.1f", dayName, dayDuration)
-		fmt.Println(dayDurationStr)
+		fmt.Printf("%s time reported total: %.1f\n", dayName, dayDuration)
 	}
 	
-	totalDurationStr := fmt.Sprintf("Time reported all week: %.1f of 40", totalDuration)
-	fmt.Println(totalDurationStr)
+	fmt.Printf("Time reported all week: %.1f of 40\n", totalDuration)
 
 }
 
@@ -140,7 +139,7 @@ func getToday() {
         CurrentDateStart := time.Date(year,month,day,0,0,0,0,loc)
         CurrentDateEnd := time.Date(year,month,day,23,59,59,0,loc)
         customLayout := "2006-01-02T15:04:05"
-        url := BaseUrl  + "timesheets?begin=" + CurrentDateStart.Format(customLayout)  + "&end=" + CurrentDateEnd.Format(customLayout)
+        url := BaseURL  + "timesheets?begin=" + CurrentDateStart.Format(customLayout)  + "&end=" + CurrentDateEnd.Format(customLayout)
         body := makeRequest(url)
         var timesheets []TimeSheet
         err := json.NewDecoder(strings.NewReader(body)).Decode(&timesheets)
@@ -153,14 +152,18 @@ func getToday() {
         }
 }
 
-func getProject(projectId int) Project {
-	url := BaseUrl + "projects/" + strconv.Itoa(projectId)
+func getProject(projectID int) Project {
+	if project, ok := projectCache[projectID]; ok {
+		return project
+	}
+	url := BaseURL + "projects/" + strconv.Itoa(projectID)
 	body := makeRequest(url)
 	var project Project
 	err := json.NewDecoder(strings.NewReader(body)).Decode(&project)
 	if err != nil {
 		panic(err)
 	}
+	projectCache[projectID] = project
 	return project
 }
 
@@ -186,18 +189,16 @@ func getShortWeekInfo() {
 			}	
 		}
 	}
-	message := fmt.Sprintf("t: %.1f (of 8), w: %.1f (of %d/40)", dayDuration, weekDuration, weekLength)
-	fmt.Println(message)
+	fmt.Printf("t: %.1f (of 8), w: %.1f (of %d/40)\n", dayDuration, weekDuration, weekLength)
 }
 
 func outputSheet(sheet TimeSheet, duration float64) {
 	project := getProject(sheet.Project)
-	message := fmt.Sprintf("%s %s %d - %s %.1f", project.CustomerName, project.ProjectName , sheet.Activity, sheet.Description, duration)
-	fmt.Println(message)
+	fmt.Printf("%s %s %d - %s %.1f\n", project.CustomerName, project.ProjectName , sheet.Activity, sheet.Description, duration)
 }
 
 func searchCustomers(customer string) []Customer {
-	url := BaseUrl + "customers?term=" + customer
+	url := BaseURL + "customers?term=" + url.QueryEscape(customer)
 	body := makeRequest(url)
 	var customers []Customer
   err := json.NewDecoder(strings.NewReader(body)).Decode(&customers)
@@ -208,7 +209,7 @@ func searchCustomers(customer string) []Customer {
 }
 
 func searchTimesheets(term string) []TimeSheet {
-	url := BaseUrl + "timesheets?term=" + term
+	url := BaseURL + "timesheets?term=" + url.QueryEscape(term)
 	sheets := getTimeSheets(url)
 	return sheets
 }
@@ -224,14 +225,13 @@ func searchCustomerAndDescription(customer string, description string) {
 	totalHitDuration := 0.0
 	for _, timesheet := range timesheets {
 		project := getProject(timesheet.Project)
-		if slices.Contains(customer_ids, project.CustomerId) {
+		if slices.Contains(customer_ids, project.CustomerID) {
 			duration = timesheet.Duration / 3600 
 			totalHitDuration = totalHitDuration + duration
 			outputSheet(timesheet, duration)
 		}
 	}
-	msg := fmt.Sprintf("Total duration of all hits: %.1f", totalHitDuration)
-	fmt.Println(msg)
+	fmt.Printf("Total duration of all hits: %.1f\n", totalHitDuration)
 }
 
 func makeRequest(url string) string {
@@ -251,8 +251,7 @@ func makeRequest(url string) string {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		msg := fmt.Sprintf("Could not reach kimai endpoint: %s , got error code %d", url, resp.StatusCode);
-		fmt.Println(msg)
+		fmt.Fprintf(os.Stderr, "Could not reach kimai endpoint: %s , got error code %d\n", url, resp.StatusCode)
 		os.Exit(1)
 	}
 
@@ -289,8 +288,8 @@ func main() {
 
 			// Parse only the arguments AFTER the word "search"
 			searchCmd.Parse(os.Args[2:])
-			customerValue := url.QueryEscape(*customerPtr)
-			descriptionValue := url.QueryEscape(*descriptionPtr)
+			customerValue := *customerPtr
+			descriptionValue := *descriptionPtr
 			if len(customerValue) == 0 ||  len(descriptionValue) == 0 {
 				fmt.Println("You need to enter customer and description to use search. e.g \"-customer custom\" and \"-description description\".")
 				return
