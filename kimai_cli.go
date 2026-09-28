@@ -5,13 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -148,15 +146,7 @@ func (c *Client) getWeek() error {
 }
 
 func (c *Client) getTimeSheets(endpoint string) ([]TimeSheet, error) {
-	body, err := c.makeRequest(endpoint)
-	if err != nil {
-		return nil, err
-	}
-	var timesheets []TimeSheet
-	if err := json.NewDecoder(strings.NewReader(body)).Decode(&timesheets); err != nil {
-		return nil, fmt.Errorf("decode timesheets: %w", err)
-	}
-	return timesheets, nil
+	return getJSON[[]TimeSheet](c, endpoint)
 }
 
 func (c *Client) getToday() error {
@@ -164,7 +154,7 @@ func (c *Client) getToday() error {
 	year, month, day := now.Date()
 	loc := now.Location()
 	currentDateStart := time.Date(year, month, day, 0, 0, 0, 0, loc)
-	currentDateEnd := currentDateStart.AddDate(0,0,1)
+	currentDateEnd := currentDateStart.AddDate(0, 0, 1)
 	endpoint := c.baseURL + "timesheets?begin=" + currentDateStart.Format(customLayout) + "&end=" + currentDateEnd.Format(customLayout)
 	timesheets, err := c.getTimeSheets(endpoint)
 	if err != nil {
@@ -183,13 +173,9 @@ func (c *Client) getProject(projectID int) (Project, error) {
 	if project, ok := c.projectCache[projectID]; ok {
 		return project, nil
 	}
-	body, err := c.makeRequest(c.baseURL + "projects/" + strconv.Itoa(projectID))
+	project, err := getJSON[Project](c, c.baseURL+"projects/"+strconv.Itoa(projectID))
 	if err != nil {
 		return Project{}, fmt.Errorf("get project %d: %w", projectID, err)
-	}
-	var project Project
-	if err := json.NewDecoder(strings.NewReader(body)).Decode(&project); err != nil {
-		return Project{}, fmt.Errorf("decode project %d: %w", projectID, err)
 	}
 	c.projectCache[projectID] = project
 	return project, nil
@@ -233,13 +219,9 @@ func (c *Client) outputSheet(sheet TimeSheet, duration float64) error {
 }
 
 func (c *Client) searchCustomers(customer string) ([]Customer, error) {
-	body, err := c.makeRequest(c.baseURL + "customers?term=" + url.QueryEscape(customer))
+	customers, err := getJSON[[]Customer](c, c.baseURL+"customers?term="+url.QueryEscape(customer))
 	if err != nil {
 		return nil, fmt.Errorf("search customers: %w", err)
-	}
-	var customers []Customer
-	if err := json.NewDecoder(strings.NewReader(body)).Decode(&customers); err != nil {
-		return nil, fmt.Errorf("decode customers: %w", err)
 	}
 	return customers, nil
 }
@@ -283,29 +265,30 @@ func (c *Client) searchCustomerAndDescription(customer string, description strin
 	return nil
 }
 
-func (c *Client) makeRequest(endpoint string) (string, error) {
+func getJSON[T any](c *Client, endpoint string) (T, error) {
+	var result T
+
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
+		return result, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request %s: %w", endpoint, err)
+		return result, fmt.Errorf("request %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("could not reach kimai endpoint %s: got status %d", endpoint, resp.StatusCode)
+		return result, fmt.Errorf("could not reach kimai endpoint %s: got status %d", endpoint, resp.StatusCode)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read body from %s: %w", endpoint, err)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return result, fmt.Errorf("decode %s: %w", endpoint, err)
 	}
-	return string(bodyBytes), nil
+	return result, nil
 }
 
 func main() {
