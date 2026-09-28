@@ -221,27 +221,26 @@ func (c *Client) getShortWeekInfo() error {
 	if err != nil {
 		return err
 	}
-	workDays := getWorkWeekMF(time.Now())
-	weekDuration := 0.0
-	dayDuration := 0.0
+	today, week, target := summarizeWeek(weeklyData, time.Now())
+	fmt.Printf("t: %.1f (of 8), w: %.1f (of %d/40)\n", today, week, target)
+	return nil
+}
 
-	// Week defaults to US system, where Sunday is 1.
-	w := time.Now().Weekday()
-	dayNumber := (int(w)+6)%7 + 1
-	weekLength := 8 * min(dayNumber, 5)
+func summarizeWeek(data map[string][]TimeSheet, now time.Time) (today, week float64, target int) {
+	workDays := getWorkWeekMF(now)
+	dayNumber := (int(now.Weekday())+6)%7 + 1 // Monday = 1 ... Sunday = 7
+	target = 8 * min(dayNumber, 5)
+
 	for daynum, day := range workDays {
-		dayName := day.Start.Weekday().String()
-		sheets := weeklyData[dayName] // Fetch the already-fetched sheets from our map
-		for _, sheet := range sheets {
+		for _, sheet := range data[day.DayName] {
 			duration := sheet.Duration / 3600
-			weekDuration = weekDuration + duration
+			week += duration
 			if daynum+1 == dayNumber {
-				dayDuration = dayDuration + duration
+				today += duration
 			}
 		}
 	}
-	fmt.Printf("t: %.1f (of 8), w: %.1f (of %d/40)\n", dayDuration, weekDuration, weekLength)
-	return nil
+	return today, week, target
 }
 
 func (c *Client) outputSheet(sheet TimeSheet, duration float64) error {
