@@ -49,7 +49,7 @@ type Customer struct {
 const defaultBaseURL = "https://kimai.hpns.dev/api/"
 const customLayout = "2006-01-02T15:04:05"
 
-func getWOrkWeekMF(t time.Time) []DayRange {
+func getWorkWeekMF(t time.Time) []DayRange {
 	currentDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
 	weekday := int(currentDate.Weekday())
 	if weekday == 0 {
@@ -89,7 +89,7 @@ func getToken() string {
 }
 
 func (c *Client) fetchWeekData() (map[string][]TimeSheet, error) {
-	workDays := getWOrkWeekMF(time.Now())
+	workDays := getWorkWeekMF(time.Now())
 	weeklyMap := make(map[string][]TimeSheet)
 	// Each goroutine writes only to its own index, so errs needs no mutex.
 	errs := make([]error, len(workDays))
@@ -123,7 +123,7 @@ func (c *Client) getWeek() error {
 		return err
 	}
 	totalDuration := 0.0
-	workDays := getWOrkWeekMF(time.Now())
+	workDays := getWorkWeekMF(time.Now())
 	for _, day := range workDays {
 		dayName := day.Start.Weekday().String()
 		sheets := weeklyMap[dayName] // Fetch the already-fetched sheets from our map
@@ -186,7 +186,7 @@ func (c *Client) getShortWeekInfo() error {
 	if err != nil {
 		return err
 	}
-	workDays := getWOrkWeekMF(time.Now())
+	workDays := getWorkWeekMF(time.Now())
 	weekDuration := 0.0
 	dayDuration := 0.0
 
