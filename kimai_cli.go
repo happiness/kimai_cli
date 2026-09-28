@@ -1,59 +1,60 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"log"
-	"time"
-	"io"
-	"encoding/json"
-	"strings"
-	"strconv"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
-	"flag"
+	"time"
 )
 
 type TimeSheet struct {
-	ID 				   int 	       `json:"id"`
-	Activity     int 	       `json:"activity"`
-	Project      int         `json:"project"`
-	Duration     float64     `json:"duration"`
-	Description  string      `json:"description"`
+	ID          int     `json:"id"`
+	Activity    int     `json:"activity"`
+	Project     int     `json:"project"`
+	Duration    float64 `json:"duration"`
+	Description string  `json:"description"`
 }
 
 type Project struct {
-	CustomerName 			 string      `json:"parentTitle"`
-	ProjectName				 string      `json:"name"`
-	CustomerID         int      `json:"customer"`
+	CustomerName string `json:"parentTitle"`
+	ProjectName  string `json:"name"`
+	CustomerID   int    `json:"customer"`
 }
 
 type DayRange struct {
-	DayName  string
-	Start    time.Time
-	End      time.Time
+	DayName string
+	Start   time.Time
+	End     time.Time
 }
 
 type Customer struct {
-	ID           int    `json:"id"` 
-	Description  string `json:"description"`
+	ID          int    `json:"id"`
+	Description string `json:"description"`
 }
 
 var token string
+
 const BaseURL = "https://kimai.hpns.dev/api/"
-const customLayout= "2006-01-02T15:04:05"
+const customLayout = "2006-01-02T15:04:05"
+
 var projectCache = map[int]Project{}
 
 func setToken() {
-	token = os.Getenv("KIMAI_TOKEN");
+	token = os.Getenv("KIMAI_TOKEN")
 	if token == "" {
 		fmt.Println("No KIMAI_TOKEN enviorment variable. This is a required variable.")
 		os.Exit(3)
 	}
 }
-
 
 func GetWorkWeekMF(t time.Time) []DayRange {
 	currentDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
@@ -76,229 +77,267 @@ func GetWorkWeekMF(t time.Time) []DayRange {
 	return workDays
 }
 
-
-func fetchWeekData() map[string][]TimeSheet {
-	now := time.Now()
-	workDays := GetWorkWeekMF(now)
+func fetchWeekData() (map[string][]TimeSheet, error) {
+	workDays := GetWorkWeekMF(time.Now())
 	weeklyMap := make(map[string][]TimeSheet)
+	// Each goroutine writes only to its own index, so errs needs no mutex.
+	errs := make([]error, len(workDays))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	for _, day := range workDays {
+	for i, d := range workDays {
 		wg.Add(1)
-		go func(d DayRange) {
+		go func() {
 			defer wg.Done()
-			url := BaseURL + "timesheets?begin=" + d.Start.Format(customLayout) + "&end=" + d.End.Format(customLayout)
-			timesheets := getTimeSheets(url)
+			endpoint := BaseURL + "timesheets?begin=" + d.Start.Format(customLayout) + "&end=" + d.End.Format(customLayout)
+			timesheets, err := getTimeSheets(endpoint)
+			if err != nil {
+				errs[i] = fmt.Errorf("fetch %s: %w", d.DayName, err)
+				return
+			}
 			mu.Lock()
-			weeklyMap[d.Start.Weekday().String()] = timesheets            
+			weeklyMap[d.DayName] = timesheets
 			mu.Unlock()
-		}(day)
+		}()
 	}
 	wg.Wait()
-	return weeklyMap
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return weeklyMap, nil
 }
 
-func getWeek() {
-	weeklyMap := fetchWeekData()
+func getWeek() error {
+	weeklyMap, err := fetchWeekData()
+	if err != nil {
+		return err
+	}
 	totalDuration := 0.0
-	now := time.Now()
-	workDays := GetWorkWeekMF(now)
+	workDays := GetWorkWeekMF(time.Now())
 	for _, day := range workDays {
 		dayName := day.Start.Weekday().String()
 		sheets := weeklyMap[dayName] // Fetch the already-fetched sheets from our map
 		fmt.Println(dayName)
 		dayDuration := 0.0
-		
+
 		for _, sheet := range sheets {
-			duration := float64(sheet.Duration) / 3600.0
+			duration := sheet.Duration / 3600.0
 			totalDuration = totalDuration + duration
 			dayDuration = dayDuration + duration
-			outputSheet(sheet, duration)
+			if err := outputSheet(sheet, duration); err != nil {
+				return err
+			}
 		}
 		fmt.Printf("%s time reported total: %.1f\n", dayName, dayDuration)
 	}
-	
+
 	fmt.Printf("Time reported all week: %.1f of 40\n", totalDuration)
-
+	return nil
 }
 
-func getTimeSheets(url string) []TimeSheet {
-        body := makeRequest(url)        
-        var timesheets []TimeSheet
-        err := json.NewDecoder(strings.NewReader(body)).Decode(&timesheets)
-        if err != nil {
-                panic(err)
-        }
-        return timesheets
-}
-
-func getToday() {
-        now := time.Now()
-        year, month, day := now.Date()
-        loc := now.Location()
-        CurrentDateStart := time.Date(year,month,day,0,0,0,0,loc)
-        CurrentDateEnd := time.Date(year,month,day,23,59,59,0,loc)
-        customLayout := "2006-01-02T15:04:05"
-        url := BaseURL  + "timesheets?begin=" + CurrentDateStart.Format(customLayout)  + "&end=" + CurrentDateEnd.Format(customLayout)
-        body := makeRequest(url)
-        var timesheets []TimeSheet
-        err := json.NewDecoder(strings.NewReader(body)).Decode(&timesheets)
-        if err != nil {
-                panic(err)
-        }
-        for _,sheet := range timesheets {
-                duration := sheet.Duration / 3600
-								outputSheet(sheet, duration)
-        }
-}
-
-func getProject(projectID int) Project {
-	if project, ok := projectCache[projectID]; ok {
-		return project
-	}
-	url := BaseURL + "projects/" + strconv.Itoa(projectID)
-	body := makeRequest(url)
-	var project Project
-	err := json.NewDecoder(strings.NewReader(body)).Decode(&project)
+func getTimeSheets(endpoint string) ([]TimeSheet, error) {
+	body, err := makeRequest(endpoint)
 	if err != nil {
-		panic(err)
+		return nil, err
+	}
+	var timesheets []TimeSheet
+	if err := json.NewDecoder(strings.NewReader(body)).Decode(&timesheets); err != nil {
+		return nil, fmt.Errorf("decode timesheets: %w", err)
+	}
+	return timesheets, nil
+}
+
+func getToday() error {
+	now := time.Now()
+	year, month, day := now.Date()
+	loc := now.Location()
+	currentDateStart := time.Date(year, month, day, 0, 0, 0, 0, loc)
+	currentDateEnd := time.Date(year, month, day, 23, 59, 59, 0, loc)
+	endpoint := BaseURL + "timesheets?begin=" + currentDateStart.Format(customLayout) + "&end=" + currentDateEnd.Format(customLayout)
+	timesheets, err := getTimeSheets(endpoint)
+	if err != nil {
+		return err
+	}
+	for _, sheet := range timesheets {
+		duration := sheet.Duration / 3600
+		if err := outputSheet(sheet, duration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func getProject(projectID int) (Project, error) {
+	if project, ok := projectCache[projectID]; ok {
+		return project, nil
+	}
+	body, err := makeRequest(BaseURL + "projects/" + strconv.Itoa(projectID))
+	if err != nil {
+		return Project{}, fmt.Errorf("get project %d: %w", projectID, err)
+	}
+	var project Project
+	if err := json.NewDecoder(strings.NewReader(body)).Decode(&project); err != nil {
+		return Project{}, fmt.Errorf("decode project %d: %w", projectID, err)
 	}
 	projectCache[projectID] = project
-	return project
+	return project, nil
 }
 
-func getShortWeekInfo() {
-	weeklyData := fetchWeekData()
+func getShortWeekInfo() error {
+	weeklyData, err := fetchWeekData()
+	if err != nil {
+		return err
+	}
 	workDays := GetWorkWeekMF(time.Now())
 	weekDuration := 0.0
 	dayDuration := 0.0
-	weekLength := 0
 
 	// Week defaults to US system, where Sunday is 1.
 	w := time.Now().Weekday()
 	dayNumber := (int(w)+6)%7 + 1
-	weekLength = 8 * min(dayNumber, 5)
+	weekLength := 8 * min(dayNumber, 5)
 	for daynum, day := range workDays {
 		dayName := day.Start.Weekday().String()
 		sheets := weeklyData[dayName] // Fetch the already-fetched sheets from our map
 		for _, sheet := range sheets {
 			duration := sheet.Duration / 3600
-			weekDuration = weekDuration +  duration
-			if daynum + 1 == dayNumber {
+			weekDuration = weekDuration + duration
+			if daynum+1 == dayNumber {
 				dayDuration = dayDuration + duration
-			}	
+			}
 		}
 	}
 	fmt.Printf("t: %.1f (of 8), w: %.1f (of %d/40)\n", dayDuration, weekDuration, weekLength)
+	return nil
 }
 
-func outputSheet(sheet TimeSheet, duration float64) {
-	project := getProject(sheet.Project)
-	fmt.Printf("%s %s %d - %s %.1f\n", project.CustomerName, project.ProjectName , sheet.Activity, sheet.Description, duration)
+func outputSheet(sheet TimeSheet, duration float64) error {
+	project, err := getProject(sheet.Project)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s %s %d - %s %.1f\n", project.CustomerName, project.ProjectName, sheet.Activity, sheet.Description, duration)
+	return nil
 }
 
-func searchCustomers(customer string) []Customer {
-	url := BaseURL + "customers?term=" + url.QueryEscape(customer)
-	body := makeRequest(url)
+func searchCustomers(customer string) ([]Customer, error) {
+	body, err := makeRequest(BaseURL + "customers?term=" + url.QueryEscape(customer))
+	if err != nil {
+		return nil, fmt.Errorf("search customers: %w", err)
+	}
 	var customers []Customer
-  err := json.NewDecoder(strings.NewReader(body)).Decode(&customers)
-  if err != nil {
-  	panic(err)
-  }
-	return customers
+	if err := json.NewDecoder(strings.NewReader(body)).Decode(&customers); err != nil {
+		return nil, fmt.Errorf("decode customers: %w", err)
+	}
+	return customers, nil
 }
 
-func searchTimesheets(term string) []TimeSheet {
-	url := BaseURL + "timesheets?term=" + url.QueryEscape(term)
-	sheets := getTimeSheets(url)
-	return sheets
+func searchTimesheets(term string) ([]TimeSheet, error) {
+	sheets, err := getTimeSheets(BaseURL + "timesheets?term=" + url.QueryEscape(term))
+	if err != nil {
+		return nil, fmt.Errorf("search timesheets: %w", err)
+	}
+	return sheets, nil
 }
 
-func searchCustomerAndDescription(customer string, description string) {
-	customers := searchCustomers(customer)
-	timesheets := searchTimesheets(description)
-	duration := 0.0
-	var customer_ids []int
-	for _, customerHits := range customers {
-		customer_ids = append(customer_ids, customerHits.ID)
+func searchCustomerAndDescription(customer string, description string) error {
+	customers, err := searchCustomers(customer)
+	if err != nil {
+		return err
+	}
+	timesheets, err := searchTimesheets(description)
+	if err != nil {
+		return err
+	}
+	var customerIDs []int
+	for _, customerHit := range customers {
+		customerIDs = append(customerIDs, customerHit.ID)
 	}
 	totalHitDuration := 0.0
 	for _, timesheet := range timesheets {
-		project := getProject(timesheet.Project)
-		if slices.Contains(customer_ids, project.CustomerID) {
-			duration = timesheet.Duration / 3600 
+		project, err := getProject(timesheet.Project)
+		if err != nil {
+			return err
+		}
+		if slices.Contains(customerIDs, project.CustomerID) {
+			duration := timesheet.Duration / 3600
 			totalHitDuration = totalHitDuration + duration
-			outputSheet(timesheet, duration)
+			if err := outputSheet(timesheet, duration); err != nil {
+				return err
+			}
 		}
 	}
 	fmt.Printf("Total duration of all hits: %.1f\n", totalHitDuration)
+	return nil
 }
 
-func makeRequest(url string) string {
+func makeRequest(endpoint string) (string, error) {
 	client := &http.Client{}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		log.Fatal(err)
+		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer " + token)
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		return "", fmt.Errorf("request %s: %w", endpoint, err)
 	}
-
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		fmt.Fprintf(os.Stderr, "Could not reach kimai endpoint: %s , got error code %d\n", url, resp.StatusCode)
-		os.Exit(1)
+		return "", fmt.Errorf("could not reach kimai endpoint %s: got status %d", endpoint, resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		panic(err)
+		return "", fmt.Errorf("read body from %s: %w", endpoint, err)
 	}
-
-	bodyString := string(bodyBytes)
-	return bodyString
+	return string(bodyBytes), nil
 }
 
 func main() {
 	setToken()
-	if len(os.Args) < 2 {
-		getShortWeekInfo()
-		return
+	cmd := "short"
+	if len(os.Args) >= 2 {
+		cmd = os.Args[1]
 	}
-	switch os.Args[1] {
-		case "short":
-			getShortWeekInfo()
 
-		case "today":
-			getToday()
+	var err error
+	switch cmd {
+	case "short":
+		err = getShortWeekInfo()
 
-		case "week":
-			fmt.Println("Get week data")
-			getWeek()
+	case "today":
+		err = getToday()
 
-		case "s", "search":
-			searchCmd := flag.NewFlagSet("search", flag.ExitOnError)
-			customerPtr := searchCmd.String("customer", "", "The name of the customer to search for")
-			descriptionPtr := searchCmd.String("description", "", "The description keywords to search for")
+	case "week":
+		fmt.Println("Get week data")
+		err = getWeek()
 
-			// Parse only the arguments AFTER the word "search"
-			searchCmd.Parse(os.Args[2:])
-			customerValue := *customerPtr
-			descriptionValue := *descriptionPtr
-			if len(customerValue) == 0 ||  len(descriptionValue) == 0 {
-				fmt.Println("You need to enter customer and description to use search. e.g \"-customer custom\" and \"-description description\".")
-				return
-			}
-			searchCustomerAndDescription(customerValue, descriptionValue)
+	case "s", "search":
+		searchCmd := flag.NewFlagSet("search", flag.ExitOnError)
+		customerPtr := searchCmd.String("customer", "", "The name of the customer to search for")
+		descriptionPtr := searchCmd.String("description", "", "The description keywords to search for")
 
-		default:
-			fmt.Printf("Unknown command: %s\n", os.Args[1])
-			fmt.Println("Expected commands: short, today, week, search")
+		// Parse only the arguments AFTER the word "search"
+		searchCmd.Parse(os.Args[2:])
+		customerValue := *customerPtr
+		descriptionValue := *descriptionPtr
+		if len(customerValue) == 0 || len(descriptionValue) == 0 {
+			fmt.Println("You need to enter customer and description to use search. e.g \"-customer custom\" and \"-description description\".")
+			return
+		}
+		err = searchCustomerAndDescription(customerValue, descriptionValue)
+
+	default:
+		fmt.Printf("Unknown command: %s\n", cmd)
+		fmt.Println("Expected commands: short, today, week, search")
+		os.Exit(2)
+	}
+
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
 	}
 }
-
