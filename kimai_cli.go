@@ -16,6 +16,13 @@ import (
 	"time"
 )
 
+type Client struct {
+	baseURL      string
+	token        string
+	http         *http.Client
+	projectCache map[int]Project
+}
+
 type TimeSheet struct {
 	ID          int     `json:"id"`
 	Activity    int     `json:"activity"`
@@ -41,20 +48,8 @@ type Customer struct {
 	Description string `json:"description"`
 }
 
-var token string
-
-const BaseURL = "https://kimai.hpns.dev/api/"
+const defaultBaseURL = "https://kimai.hpns.dev/api/"
 const customLayout = "2006-01-02T15:04:05"
-
-var projectCache = map[int]Project{}
-
-func setToken() {
-	token = os.Getenv("KIMAI_TOKEN")
-	if token == "" {
-		fmt.Println("No KIMAI_TOKEN enviorment variable. This is a required variable.")
-		os.Exit(3)
-	}
-}
 
 func GetWorkWeekMF(t time.Time) []DayRange {
 	currentDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
@@ -77,7 +72,25 @@ func GetWorkWeekMF(t time.Time) []DayRange {
 	return workDays
 }
 
-func fetchWeekData() (map[string][]TimeSheet, error) {
+func newClient(baseURL, token string) *Client {
+	return &Client{
+		baseURL:      baseURL,
+		token:        token,
+		http:         &http.Client{Timeout: 10 * time.Second},
+		projectCache: map[int]Project{},
+	}
+}
+
+func getToken() string {
+	token := os.Getenv("KIMAI_TOKEN")
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "No KIMAI_TOKEN environment variable. This is a required variable.")
+		os.Exit(3)
+	}
+	return token
+}
+
+func (c *Client) fetchWeekData() (map[string][]TimeSheet, error) {
 	workDays := GetWorkWeekMF(time.Now())
 	weeklyMap := make(map[string][]TimeSheet)
 	// Each goroutine writes only to its own index, so errs needs no mutex.
@@ -88,8 +101,8 @@ func fetchWeekData() (map[string][]TimeSheet, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			endpoint := BaseURL + "timesheets?begin=" + d.Start.Format(customLayout) + "&end=" + d.End.Format(customLayout)
-			timesheets, err := getTimeSheets(endpoint)
+			endpoint := c.baseURL + "timesheets?begin=" + d.Start.Format(customLayout) + "&end=" + d.End.Format(customLayout)
+			timesheets, err := c.getTimeSheets(endpoint)
 			if err != nil {
 				errs[i] = fmt.Errorf("fetch %s: %w", d.DayName, err)
 				return
@@ -106,8 +119,8 @@ func fetchWeekData() (map[string][]TimeSheet, error) {
 	return weeklyMap, nil
 }
 
-func getWeek() error {
-	weeklyMap, err := fetchWeekData()
+func (c *Client) getWeek() error {
+	weeklyMap, err := c.fetchWeekData()
 	if err != nil {
 		return err
 	}
@@ -123,7 +136,7 @@ func getWeek() error {
 			duration := sheet.Duration / 3600.0
 			totalDuration = totalDuration + duration
 			dayDuration = dayDuration + duration
-			if err := outputSheet(sheet, duration); err != nil {
+			if err := c.outputSheet(sheet, duration); err != nil {
 				return err
 			}
 		}
@@ -134,8 +147,8 @@ func getWeek() error {
 	return nil
 }
 
-func getTimeSheets(endpoint string) ([]TimeSheet, error) {
-	body, err := makeRequest(endpoint)
+func (c *Client) getTimeSheets(endpoint string) ([]TimeSheet, error) {
+	body, err := c.makeRequest(endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -146,31 +159,31 @@ func getTimeSheets(endpoint string) ([]TimeSheet, error) {
 	return timesheets, nil
 }
 
-func getToday() error {
+func (c *Client) getToday() error {
 	now := time.Now()
 	year, month, day := now.Date()
 	loc := now.Location()
 	currentDateStart := time.Date(year, month, day, 0, 0, 0, 0, loc)
 	currentDateEnd := time.Date(year, month, day, 23, 59, 59, 0, loc)
-	endpoint := BaseURL + "timesheets?begin=" + currentDateStart.Format(customLayout) + "&end=" + currentDateEnd.Format(customLayout)
-	timesheets, err := getTimeSheets(endpoint)
+	endpoint := c.baseURL + "timesheets?begin=" + currentDateStart.Format(customLayout) + "&end=" + currentDateEnd.Format(customLayout)
+	timesheets, err := c.getTimeSheets(endpoint)
 	if err != nil {
 		return err
 	}
 	for _, sheet := range timesheets {
 		duration := sheet.Duration / 3600
-		if err := outputSheet(sheet, duration); err != nil {
+		if err := c.outputSheet(sheet, duration); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func getProject(projectID int) (Project, error) {
-	if project, ok := projectCache[projectID]; ok {
+func (c *Client) getProject(projectID int) (Project, error) {
+	if project, ok := c.projectCache[projectID]; ok {
 		return project, nil
 	}
-	body, err := makeRequest(BaseURL + "projects/" + strconv.Itoa(projectID))
+	body, err := c.makeRequest(c.baseURL + "projects/" + strconv.Itoa(projectID))
 	if err != nil {
 		return Project{}, fmt.Errorf("get project %d: %w", projectID, err)
 	}
@@ -178,12 +191,12 @@ func getProject(projectID int) (Project, error) {
 	if err := json.NewDecoder(strings.NewReader(body)).Decode(&project); err != nil {
 		return Project{}, fmt.Errorf("decode project %d: %w", projectID, err)
 	}
-	projectCache[projectID] = project
+	c.projectCache[projectID] = project
 	return project, nil
 }
 
-func getShortWeekInfo() error {
-	weeklyData, err := fetchWeekData()
+func (c *Client) getShortWeekInfo() error {
+	weeklyData, err := c.fetchWeekData()
 	if err != nil {
 		return err
 	}
@@ -210,8 +223,8 @@ func getShortWeekInfo() error {
 	return nil
 }
 
-func outputSheet(sheet TimeSheet, duration float64) error {
-	project, err := getProject(sheet.Project)
+func (c *Client) outputSheet(sheet TimeSheet, duration float64) error {
+	project, err := c.getProject(sheet.Project)
 	if err != nil {
 		return err
 	}
@@ -219,8 +232,8 @@ func outputSheet(sheet TimeSheet, duration float64) error {
 	return nil
 }
 
-func searchCustomers(customer string) ([]Customer, error) {
-	body, err := makeRequest(BaseURL + "customers?term=" + url.QueryEscape(customer))
+func (c *Client) searchCustomers(customer string) ([]Customer, error) {
+	body, err := c.makeRequest(c.baseURL + "customers?term=" + url.QueryEscape(customer))
 	if err != nil {
 		return nil, fmt.Errorf("search customers: %w", err)
 	}
@@ -231,20 +244,20 @@ func searchCustomers(customer string) ([]Customer, error) {
 	return customers, nil
 }
 
-func searchTimesheets(term string) ([]TimeSheet, error) {
-	sheets, err := getTimeSheets(BaseURL + "timesheets?term=" + url.QueryEscape(term))
+func (c *Client) searchTimesheets(term string) ([]TimeSheet, error) {
+	sheets, err := c.getTimeSheets(c.baseURL + "timesheets?term=" + url.QueryEscape(term))
 	if err != nil {
 		return nil, fmt.Errorf("search timesheets: %w", err)
 	}
 	return sheets, nil
 }
 
-func searchCustomerAndDescription(customer string, description string) error {
-	customers, err := searchCustomers(customer)
+func (c *Client) searchCustomerAndDescription(customer string, description string) error {
+	customers, err := c.searchCustomers(customer)
 	if err != nil {
 		return err
 	}
-	timesheets, err := searchTimesheets(description)
+	timesheets, err := c.searchTimesheets(description)
 	if err != nil {
 		return err
 	}
@@ -254,14 +267,14 @@ func searchCustomerAndDescription(customer string, description string) error {
 	}
 	totalHitDuration := 0.0
 	for _, timesheet := range timesheets {
-		project, err := getProject(timesheet.Project)
+		project, err := c.getProject(timesheet.Project)
 		if err != nil {
 			return err
 		}
 		if slices.Contains(customerIDs, project.CustomerID) {
 			duration := timesheet.Duration / 3600
 			totalHitDuration = totalHitDuration + duration
-			if err := outputSheet(timesheet, duration); err != nil {
+			if err := c.outputSheet(timesheet, duration); err != nil {
 				return err
 			}
 		}
@@ -270,16 +283,15 @@ func searchCustomerAndDescription(customer string, description string) error {
 	return nil
 }
 
-func makeRequest(endpoint string) (string, error) {
-	client := &http.Client{}
+func (c *Client) makeRequest(endpoint string) (string, error) {
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+c.token)
 
-	resp, err := client.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request %s: %w", endpoint, err)
 	}
@@ -297,7 +309,7 @@ func makeRequest(endpoint string) (string, error) {
 }
 
 func main() {
-	setToken()
+	c := newClient(defaultBaseURL, getToken())
 	cmd := "short"
 	if len(os.Args) >= 2 {
 		cmd = os.Args[1]
@@ -306,14 +318,14 @@ func main() {
 	var err error
 	switch cmd {
 	case "short":
-		err = getShortWeekInfo()
+		err = c.getShortWeekInfo()
 
 	case "today":
-		err = getToday()
+		err = c.getToday()
 
 	case "week":
 		fmt.Println("Get week data")
-		err = getWeek()
+		err = c.getWeek()
 
 	case "s", "search":
 		searchCmd := flag.NewFlagSet("search", flag.ExitOnError)
@@ -328,7 +340,7 @@ func main() {
 			fmt.Println("You need to enter customer and description to use search. e.g \"-customer custom\" and \"-description description\".")
 			return
 		}
-		err = searchCustomerAndDescription(customerValue, descriptionValue)
+		err = c.searchCustomerAndDescription(customerValue, descriptionValue)
 
 	default:
 		fmt.Printf("Unknown command: %s\n", cmd)
