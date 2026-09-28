@@ -285,6 +285,10 @@ func main() {
 			searchCmd.Parse(os.Args[2:])
 			customerValue := *customerPtr
 			descriptionValue := *descriptionPtr
+			if len(customerValue) == 0 ||  len(descriptionValue) == 0 {
+				fmt.Println("You need to enter customer and description to use search. e.g \"-customer custom\" and \"-description description\".")
+				return
+			}
 			searchCustomerAndDescription(customerValue, descriptionValue)
 
 		default:
