@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"log"
 	"time"
@@ -17,7 +18,7 @@ import (
 
 type TimeSheet struct {
 	ID 				   int 	       `json:"id"`
-	Activity     int 	       `json:"activitiy"`
+	Activity     int 	       `json:"activity"`
 	Project      int         `json:"project"`
 	Duration     float64     `json:"duration"`
 	Description  string      `json:"description"`
@@ -85,7 +86,7 @@ func fetchWeekData() map[string][]TimeSheet {
 		wg.Add(1)
 		go func(d DayRange) {
 			defer wg.Done()
-			url := BaseUrl + "timesheets?begin=" + day.Start.Format(customLayout) + "&end=" + day.End.Format(customLayout)
+			url := BaseUrl + "timesheets?begin=" + d.Start.Format(customLayout) + "&end=" + d.End.Format(customLayout)
 			timesheets := getTimeSheets(url)
 			mu.Lock()
 			weeklyMap[d.Start.Weekday().String()] = timesheets            
@@ -173,7 +174,7 @@ func getShortWeekInfo() {
 	// Week defaults to US system, where Sunday is 1.
 	w := time.Now().Weekday()
 	dayNumber := (int(w)+6)%7 + 1
-	weekLength = 8 * dayNumber
+	weekLength = 8 * min(dayNumber, 5)
 	for daynum, day := range workDays {
 		dayName := day.Start.Weekday().String()
 		sheets := weeklyData[dayName] // Fetch the already-fetched sheets from our map
@@ -196,7 +197,7 @@ func outputSheet(sheet TimeSheet, duration float64) {
 }
 
 func searchCustomers(customer string) []Customer {
-	url := BaseUrl + "customers?terms" + customer
+	url := BaseUrl + "customers?term=" + customer
 	body := makeRequest(url)
 	var customers []Customer
   err := json.NewDecoder(strings.NewReader(body)).Decode(&customers)
@@ -228,9 +229,9 @@ func searchCustomerAndDescription(customer string, description string) {
 			totalHitDuration = totalHitDuration + duration
 			outputSheet(timesheet, duration)
 		}
-		msg := fmt.Sprintf("Total duration of all hits: %.1f", totalHitDuration)
-		fmt.Println(msg)
 	}
+	msg := fmt.Sprintf("Total duration of all hits: %.1f", totalHitDuration)
+	fmt.Println(msg)
 }
 
 func makeRequest(url string) string {
@@ -248,6 +249,12 @@ func makeRequest(url string) string {
 	}
 
 	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		msg := fmt.Sprintf("Could not reach kimai endpoint: %s , got error code %d", url, resp.StatusCode);
+		fmt.Println(msg)
+		os.Exit(1)
+	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -267,7 +274,6 @@ func main() {
 	switch os.Args[1] {
 		case "short":
 			getShortWeekInfo()
-			fmt.Println("About to search")
 
 		case "today":
 			getToday()
@@ -283,8 +289,8 @@ func main() {
 
 			// Parse only the arguments AFTER the word "search"
 			searchCmd.Parse(os.Args[2:])
-			customerValue := *customerPtr
-			descriptionValue := *descriptionPtr
+			customerValue := url.QueryEscape(*customerPtr)
+			descriptionValue := url.QueryEscape(*descriptionPtr)
 			if len(customerValue) == 0 ||  len(descriptionValue) == 0 {
 				fmt.Println("You need to enter customer and description to use search. e.g \"-customer custom\" and \"-description description\".")
 				return
