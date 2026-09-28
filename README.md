@@ -114,6 +114,7 @@ kimai_cli [command]
 | `today` | All timesheets reported today. |
 | `week` | All timesheets for Monday–Friday of the current week, with a total per day and for the week. |
 | `search` (or `s`) | Timesheets for a customer that match a description. |
+| `create` (or `c`) | Report time: pick customer, project and activity, then enter a description, date and duration. |
 
 ### short
 
@@ -143,6 +144,71 @@ kimai_cli search -customer acme -description "sprint planning"
 
 This prints every timesheet whose description matches, belonging to a customer whose name matches,
 followed by the total hours.
+
+### create
+
+`create` needs a browser session as well as the API token. When Kimai uses the "duration only"
+tracking mode (`duration_fixed_begin`), the API does not accept start and end times from normal
+users, so the entry cannot be created that way. `create` therefore fills in the same web form as
+the browser does, and that form needs a logged-in session. If you log in with single sign-on
+(for example SAML), the program cannot log in by itself; you copy the session cookie from your
+browser instead:
+
+1. Log in to Kimai in your browser.
+2. Open the developer tools (F12) and find the cookies for the Kimai site: **Application** →
+   **Cookies** in Chrome, **Storage** → **Cookies** in Firefox.
+3. Copy the value of the `KIMAI_SESSION` cookie.
+4. Set it in the terminal where you run `create`:
+
+   ```sh
+   export KIMAI_SESSION="the-cookie-value"      # macOS / Linux
+   ```
+
+   ```powershell
+   $env:KIMAI_SESSION = "the-cookie-value"      # Windows PowerShell
+   ```
+
+The session expires after a while. When it has, `create` says so before asking anything; copy a
+fresh cookie and try again. Treat the cookie like a password: anyone who has it can use Kimai as you
+until the session ends.
+
+A run looks like this:
+
+```
+$ kimai_cli create
+Create a new timesheet
+Customer (search): acme
+Using the only customer: Acme Inc.
+
+Matching project:
+   1) Website
+   2) Support
+Choose project [1-2]: 1
+
+Matching activity:
+   1) Design
+   2) Development
+   3) Meeting
+Choose activity [1-3]: 2
+
+Description: New start page
+Date (YYYY-MM-DD or -N days back, empty for today): -1
+Duration (e.g. 1.5, 1:30 or 90m): 1:30
+
+Customer:    Acme Inc.
+Project:     Website
+Activity:    Development
+Description: New start page
+Date:        Mon 2026-01-12
+Duration:    1h 30m (1.5 h)
+
+Create this timesheet? [Y/n]: y
+Timesheet created
+```
+
+The date can be left empty for today, written as `-N` for N days back, or as `YYYY-MM-DD`. The
+duration can be decimal hours (`1.5`), hours and minutes (`1:30`) or minutes (`90m`). The start
+time is set by Kimai.
 
 ## Exit codes
 
@@ -181,9 +247,36 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
+## Known issues
+
+### `create` needs a browser session
+
+`create` should only need the API token, like the other commands, but in the "duration only"
+tracking mode (`duration_fixed_begin`) Kimai's API cannot create a timesheet for a past date or with
+a chosen duration:
+
+- The API only accepts `begin` and `end` in this mode when the user has the `view_other_timesheet`
+  permission. For everyone else Kimai answers `400 Validation Failed` with
+  `This form should not contain extra fields.`
+- The API never accepts a `duration` field, in any tracking mode.
+- Without `begin` and `end`, the API can only start a running timer from the current time.
+
+The web form does accept a date and a duration, so `create` fills in that form instead, the same
+way the browser does. The form needs a logged-in session, which is why you have to copy the
+`KIMAI_SESSION` cookie from the browser (see [create](#create)). This depends on the HTML of the
+form and may break when Kimai changes it.
+
+The limitation is described in Kimai issue
+[#2241](https://github.com/kimai/kimai/issues/2241), and the `view_other_timesheet` exception was
+added in [#5134](https://github.com/kimai/kimai/pull/5134). It goes away if a Kimai admin either
+gives your role the `view_other_timesheet` permission or switches to the default tracking mode;
+then `create` could use the API alone.
+
 ## Future goal
 
-My goal with this small tool is to get away from the Kimai web interface as much as possible, as going into the web interface occasionally interrupts my workflow. That means the next step will be allowing time reporting to be done directly from the command line. There is also a case for adding filtering by a specific date.
+Filtering for future dates is in the pipeline going forward. And also hopefully we get away from the
+[known issue](#create-needs-a-browser-session) where we need to fake being a browser and get the
+session id to create a timesheet.
 
 ## Why is it written in Go
 
