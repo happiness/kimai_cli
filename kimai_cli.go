@@ -164,7 +164,7 @@ func (c *Client) getToday() error {
 	year, month, day := now.Date()
 	loc := now.Location()
 	currentDateStart := time.Date(year, month, day, 0, 0, 0, 0, loc)
-	currentDateEnd := time.Date(year, month, day, 23, 59, 59, 0, loc)
+	currentDateEnd := currentDateStart.AddDate(0,0,1)
 	endpoint := c.baseURL + "timesheets?begin=" + currentDateStart.Format(customLayout) + "&end=" + currentDateEnd.Format(customLayout)
 	timesheets, err := c.getTimeSheets(endpoint)
 	if err != nil {
