@@ -51,11 +51,9 @@ type Customer struct {
 	Description string `json:"description"`
 }
 
-const defaultBaseURL = "https://kimai.hpns.dev/api/"
 const customLayout = "2006-01-02T15:04:05"
 
 // Config is read from <user config dir>/kimai_cli/config.toml.
-// The token is deliberately not part of it, it is only read from KIMAI_TOKEN.
 type Config struct {
 	URL string `toml:"url"`
 }
@@ -100,7 +98,7 @@ func getToken() string {
 }
 
 func loadConfig() (Config, error) {
-	cfg := Config{URL: defaultBaseURL}
+	var cfg Config
 
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -108,14 +106,16 @@ func loadConfig() (Config, error) {
 	}
 	path := filepath.Join(dir, "kimai_cli", "config.toml")
 	_, err = toml.DecodeFile(path, &cfg)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, fs.ErrNotExist) {
+		return cfg, fmt.Errorf("no config file found, create %s with: url = \"https://<your-kimai>/api/\"", path)
+	}
+	if err != nil {
 		return cfg, fmt.Errorf("read config %s: %w", path, err)
 	}
-
-	// Environment variable overrides the config file.
-	if v := os.Getenv("KIMAI_URL"); v != "" {
-		cfg.URL = v
+	if cfg.URL == "" {
+		return cfg, fmt.Errorf("config %s: url is not set", path)
 	}
+
 	// Endpoints are appended directly, so make sure the URL ends with a slash.
 	if !strings.HasSuffix(cfg.URL, "/") {
 		cfg.URL += "/"
